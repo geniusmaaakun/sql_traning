@@ -28,27 +28,29 @@ func main() {
 	}
 	defer db.Close()
 
+	fmt.Println("SQL injection")
 	//SQLインジェクション対策で
 	//これではなく。この続きで　%s部に ;で強制的に閉じられて、不当なクエリを実行される可能性がある。
-	cmd := fmt.Sprintf("SELECT * FROM test_user WHERE name = %s", "'tom'")
+
+	cmd := fmt.Sprintf("SELECT * FROM test_user WHERE name = %s", "'tom' or 1 = 1;")
 	fmt.Println(cmd)
 	rows, err := db.Query(cmd)
 	if err != nil {
 		log.Fatal(err)
 	}
 	defer rows.Close()
+
 	//どちらかでやること
 	/*
-		prep, err := db.Prepare("SELECT * FROM test_user WHERE name = $1")
-		defer prep.Close()
-		rows, err := prep.Query("tom")
-		defer rows.Close()
+			prep, err := db.Prepare("SELECT * FROM test_user WHERE name = $1")
+			defer prep.Close()
+			rows, err := prep.Query("tom")
+			defer rows.Close()
 
 
-		rows, err := db.Query("SELECT * FROM test_user WHERE name = $1", "tom")
+		rows, err := db.Query("SELECT * FROM test_user WHERE name = $1", "tom or 1 = 1;")
 		defer rows.Close()
 	*/
-
 	var u User
 	//rows.Scan()はpointerで渡した型に取得したdataをマッピング
 	for rows.Next() {
@@ -62,6 +64,7 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
+	fmt.Println("SQL injection")
 
 	//シングルセレクト
 	var u2 User
