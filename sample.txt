@@ -1,0 +1,516 @@
+note.
+
+https://sourjp.github.io/posts/go-db/
+
+学んだことのメモ
+
+Go database/sql の操作ガイドあったんかい
+Posted on Aug 17, 2020
+go db
+database/sqlを触ってますが、いまいちしっかり説明してくれるリソースがないなあと思ってたら、goのwikiにGo database/sql tutorialがありました！
+
+ということで試しながらポイントを整理してきます。
+
+Overview
+DBへのアクセスには sql.DB を利用
+sql.DB　は指定したDriverへアクセスを抽象化した存在
+これによってDriverがPostgresでも、MySQLでも統一した操作を提供
+Importing a Database Driver
+利用には database/sql とDriverパッケージの二つが必要
+一般的にDriverパッケージは依存するため使わない
+database/sql を介してアクセス
+Dirver自体は次のようにすることでDriverとして登録(Go import _ ってなんだみてね)
+import (
+	"database/sql"
+
+	_ "github.com/lib/pq"
+)
+wikiではmysqlですが、今回はpostgres driverを使います
+
+Accessing the Database
+sql.Open()により取得したobjectでDBを操作可能
+第一引数はdriverの名前で、第二引数はパラメーター(PGの場合はココ)を渡します
+
+テストとしてDBが必要なのでDockerのpostgres利用することにして、簡単にMakefileを用意します
+
+$ docker run --name go-pg -e POSTGRES_USER=root -e POSTGRES_PASSWORD=root -e POSTGRES_DB=test -p 5432:5432 -d postgres:12.4
+
+init-db:
+	@docker run --name go-pg -e POSTGRES_USER=root -e POSTGRES_PASSWORD=root -e POSTGRES_DB=test -p 5432:5432 -d postgres:12.4
+
+clean-db:
+	@docker kill go-pg
+	@docker rm go-pg
+GoによりDBへのアクセスはsql.Open()を使いますが、これはDBへアクセスできるオブジェクトを返すだけなので、実際の接続テストはsql.Ping()を使用することで確認できます(ただしdriverによってping()の実装は変わるようです)
+
+func main() {
+	db, err := sql.Open("postgres", "user=root password=root host=localhost dbname=test sslmode=disable")
+	if err != nil {
+		log.Fatal("OpenError: ", err)
+	}
+	defer db.Close()
+	if err := db.Ping(); err != nil {
+		log.Fatal("PingError: ", err)
+	}
+}
+sql.Open()は接続を確立するのではなく、抽象化した構造体を返す
+func OpenDB(c driver.Connector) *DB {
+	ctx, cancel := context.WithCancel(context.Background())
+	db := &DB{
+		connector:    c,
+		openerCh:     make(chan struct{}, connectionRequestQueueSize),
+		lastPut:      make(map[*driverConn]string),
+		connRequests: make(map[uint64]chan connRequest),
+		stop:         cancel,
+	}
+
+	go db.connectionOpener(ctx)
+
+	return db
+}
+db.Ping()により接続テスト
+わざとユーザー名を間違えた場合、db.Ping()で検出されています
+
+$ go run main.go 
+2020/08/17 22:47:24 PingError: pq: password authentication failed for user "roo"
+exit status 1
+dbはConnection Poolを利用するため一度Open()したものをClose()せずに使いまわすことが基本
+
+Open(), Close()を頻繁にすると利用効率の低下、ネットワーク帯域の圧迫、TCPのTIME_WAITなどが発生するやも
+
+Retrieving Results Sets
+大きくQuery()とExec()の2種類あり、次の用途で使い分けること
+・Query: 複数の検索結果(rows)を取得する場合(SELECT)。 一行(row)の場合はQueryRow()。
+・Exec: 検索結果を取得しない場合(CREATE, INSERT, UPDATE, DELETE etc)
+
+SELECTを試すために、こんな感じで適当にデータをDBに入力します。正しくは次の Modifying Data and Using Transactions を参照ください。
+
+id	name
+1	tom
+2	tom
+3	tom
+type User struct {
+	ID   string `db:"id"`
+	Name string `db:"name"`
+}
+func Insert(db *sql.DB) error {
+	_, err := db.Exec(`CREATE TABLE IF NOT EXISTS test_user (
+		id SERIAL NOT NULL PRIMARY KEY,
+		name VARCHAR(10))`)
+	if err != nil {
+		return err
+	}
+
+	_, err = db.Exec("INSERT INTO test_user (name) VALUES ('tom')")
+	if err != nil {
+		return err
+	}
+	return nil
+}
+続いて取得してみます
+
+func main() {
+	rows, err := db.Query("SELECT * FROM test_user")
+	if err != nil {
+		log.Println(err)
+	}
+	defer rows.Close()
+
+	var u User
+	for rows.Next() {
+		err := rows.Scan(&u.ID, &u.Name)
+		if err != nil {
+			log.Fatal(err)
+		}
+		fmt.Printf("ID: %s, Name: %s\n", u.ID, u.Name)
+	}
+	err = rows.Err()
+	if err != nil {
+		log.Fatal(err)
+	}
+}
+$ go run main.go 
+ID: 1, Name: tom
+ID: 2, Name: tom
+ID: 3, Name: tom
+rows.Close()は rows.Err() のあとで、defer を for外 (memory leakする)で必ず利用
+rows.Scan()はpointerで渡した型に取得したdataをマッピング
+上記の例ではScan(&u.ID, &u.Name)と構造体の中身を一つずつ渡していますが、数が増えると正直手間です。これを構造体渡すだけ(&u)でいいようにするには package database/sqlx が使えます。
+
+SQLに引数を利用する場合はdb.Prepare()かdb.Query()で渡すこと
+プレースホルダで記載することでSQLインジェクション対策にもなります。もし検索機能などで外部からVALUEを受け取る場合はfmt.Sprintf()では作らないようにする。
+
+prep, err := db.Prepare("SELECT * FROM test_user WHERE name = $1")
+defer prep.Close()
+rows, err := prep.Query("tom")
+defer rows.Close()
+/* ------- */
+rows, err := db.Query("SELECT * FROM test_user WHERE name = $1", "tom")
+defer rows.Close()
+Queryの戻り値が一つとしてわかっている(主キー)なら、db.QueryRow()を使うこともできます。
+var u User
+err = db.QueryRow("SELECT * FROM test_user WHERE id = $1", 1).Scan(&u.ID, &u.Name)
+if err != nil {
+	log.Println(err)
+}
+/* ------- */
+var u User
+prep, err := db.Prepare("SELECT * FROM test_user WHERE id = $1")
+defer prep.Close()
+err = prep.QueryRow(1).Scan(&u.ID, &u.Name)
+if err != nil {
+	log.Println(err)
+}
+Modifying Data and Using Transactions
+Insertを使う場合はExecを使用するが、InsertされたIDを確認するにはMySQLとPostgresで方法が異なる
+・MySQL
+サンプルの直接抜粋です
+
+stmt, err := db.Prepare("INSERT INTO test_user(name) VALUES(?)")
+if err != nil {
+	log.Fatal(err)
+}
+res, err := stmt.Exec("john")
+if err != nil {
+	log.Fatal(err)
+}
+LastID, err := res.LastInsertId()
+if err != nil {
+	log.Fatal(err)
+}
+rowCnt, err := res.RowsAffected()
+if err != nil {
+	log.Fatal(err)
+}
+log.Printf("ID = %d, affected = %d\n", LastID, rowCnt)
+・PostgreSQL
+Postgresの場合は LanstInsertId() に非対応(see. #24)でPostgres自体の仕様です。
+
+$ go run main.go 
+2020/08/18 10:30:57 LastInsertId is not supported by this driver
+exit status 1
+そのため次のように確認します。
+
+var ID int
+err = db.QueryRow("INSERT INTO test_user(name) VALUES($1) RETURNING id", "john").Scan(&ID)
+if err != nil {
+	log.Fatal(err)
+}
+log.Printf("ID = %d\n", ID)
+
+/*
+test=# select * from test_user where id = 6;
+  6 | john
+*/
+INSERTは db.Exec() じゃないの？と思うかもしれません。これは db.Query() がrowの戻りを期待して待ってしまうことで Connectionを予約し続けることに起因します。 一方で上記の場合は postgres から id を返すため、db.Query() で実行しています。
+
+rowsの戻りがない場合は db.Exec() を使う
+
+SQL statementを利用した直接の BEGIN, COMMIT は不具合を招くことがあるので使わない
+
+使うメソッドは4つで名前の通です。
+・db.Begin()
+・tx.Exec()
+・tx.Rollback()
+・tx.Commit()
+
+main関数で書いたのでerror処理やdeferなどざっくりですが、こんな感じです。
+
+tx, err := db.Begin()
+if err != nil {
+	log.Println(err)
+}
+
+_, err = tx.Exec("INSERT INTO test_user(name) VALUES($1)", "TRANS")
+if err != nil {
+	log.Println(err)
+}
+
+if err != nil {
+	if err := tx.Rollback(); err != nil {
+		log.Println(err)
+	}
+} else {
+	if err := tx.Commit(); err != nil {
+		log.Println(err)
+	}
+}
+
+/*
+test=# select * from test_user where name = 'TRANS';
+  9 | TRANS
+*/
+使ってはいけない理由は上記のメソッドを使わないと、一連のステートメントの処理は異なるコネクションを利用する場合があり、そもそもトランザクション処理が想定外な動作になるケースや、返却したコネクションを再利用したコネクションにその影響が出てしまうため、必ずトランザクション用のコネクション(Tx)を作って実行する必要があるようです。
+
+番外編として、次のようにするとtransactionの処理をWrapすると効率的(see. database/sql Tx - detecting Commit or Rollback)
+func main() {
+	db, err := sql.Open("postgres", "user=root password=root host=localhost dbname=test sslmode=disable")
+	if err != nil {
+		log.Fatal("OpenError: ", err)
+	}
+	if err := db.Ping(); err != nil {
+		log.Fatal("PingError: ", err)
+	}
+
+	err = Insert(db, "Jane")
+	if err != nil {
+		fmt.Println(err)
+	}
+
+}
+
+func Insert(db *sql.DB, name string) error {
+	return Transaction(db, func(tx *sql.Tx) error {
+		_, err := tx.Exec("INSERT INTO test_user(name) VALUES($1)", name)
+		if err != nil {
+			return fmt.Errorf("Insert() got errors: %v", err)
+		}
+		return nil
+	})
+}
+
+func Transaction(db *sql.DB, txFunc func(*sql.Tx) error) (err error) {
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if p := recover(); p != nil {
+			tx.Rollback()
+			panic(p)
+		} else if err != nil {
+			rerr := tx.Rollback()
+			err = fmt.Errorf("original=%v, rerr=%v", err, rerr)
+		} else {
+			if rerr := tx.Commit(); rerr != nil {
+				err = fmt.Errorf("original=%v, rerr=%v", err, rerr)
+			}
+		}
+	}()
+
+	err = txFunc(tx)
+	return err
+}
+
+/*
+test=# select * from test_user where name = 'Jane';
+ 10 | Jane
+*/
+Using Prepared Statements
+Goではプリペアドステートメントをdb.Query(), db.Prepare(), tx.Prepare()などで利用で
+プリペアするとDB poolのconnectionに紐づいたStmtを返すため、それを利用する
+仮に紐づいたコネクションが使えなかったら新たに内部で取得する
+ただ言い換えるとビジー状態が続いてしまうと、プリペアドステートメントを大量に作るので気づいたら上限に達する可能性がある
+プリペアドステートメントを利用したくない場合はdb.Query(fmt.Sprintf(str))で渡す
+Handling Errors
+DBの各操作には必ずerrorを返すため、無視しないこと
+rows.Next()は問題が起きた場合に自動でrows.Close()する
+func (rs *Rows) Next() bool {
+	var doClose, ok bool
+	withLock(rs.closemu.RLocker(), func() {
+		doClose, ok = rs.nextLocked()
+	})
+	if doClose {
+		rs.Close()
+	}
+	return ok
+}
+rows.Err()で、rows.Next()によるループ中のエラーをキャッチする
+func (rs *Rows) nextLocked() (doClose, ok bool) {
+	---snip---
+	rs.lasterr = rs.rowsi.Next(rs.lastcols) // <---ここでclose判定 + Err()で取り出す要素にerrを入れる
+	if rs.lasterr != nil {
+		if rs.lasterr != io.EOF {
+			return true, false
+		}
+		nextResultSet, ok := rs.rowsi.(driver.RowsNextResultSet)
+		if !ok {
+			return true, false
+		}
+		if !nextResultSet.HasNextResultSet() {
+			doClose = true
+		}
+		return doClose, false
+	}
+	return false, true
+}
+rows.Close()もerrを返すが、それによって何をすべきがいいかわからないのでエラー処理の唯一の例外（強いていうならログ出力ぐらい）
+
+検索結果がゼロの場合、QueryRow()にはエラー処理(sql.ErrNoRows)が必要。Query()は大丈夫。
+
+出力する理由は、QueryRow()の検索結果がないのか、Scan()ができてないのかを識別させるため(?)
+
+var u User
+err = db.QueryRow("SELECT * FROM test_user where name = $1", "John").Scan(&u.ID, &u.Name)
+if err != nil {
+	if err == sql.ErrNoRows {
+		log.Printf("I got err but not problem: %s", err)
+	} else {
+		log.Fatal(err)
+	}
+}
+
+/*
+$ go run main.go 
+2020/08/18 15:01:55 I got err but not problem: sql: no rows in result set
+*/
+DBのエラー判定もcastを利用することで可能な場合がある
+errの文中に含まれるかという判定も一つですが、driverによってはtypeをcastして判定する方法も用意されているようです。
+
+var u User
+err = db.QueryRow("SELECT * FROM test_user where name = $1", "bob").Scan(&u.ID, &u.Name)
+
+if err != nil {
+	if err == sql.ErrNoRows {
+		log.Printf("I got err but not problem: %s", err)
+	} else {
+		log.Fatal(err)
+	}
+}
+
+/*
+$ go run main.go 
+2020/08/18 15:16:15 pq: password authentication failed for user "root" <--- こういうの
+*/
+コネクションエラーの処理は特に実装の必要はない
+database/sql がコネクションプーリングの一部として最大10回のリトライ機構を備えているようです
+
+Working with NULLs
+NULLは使わない方がいい。DBの観点もあるが、Goの観点からではゼロ値の概念があるため相性が悪い。
+次のようにcastすることはできません
+
+/*
+test=# select * from test_user;
+  1 | bob  |  12
+  2 | tom  |  	  <--- NULL
+*/
+
+type User struct {
+	ID   string `db:"id"`
+	Name string `db:"name"`
+	Age  int	`db:"age"`
+}
+
+func main() {
+	...
+	var u User
+	rows, _ := db.Query("SELECT * FROM test_user")
+	for rows.Next() {
+		if err := rows.Scan(&u.ID, &u.Name, &u.Age); err != nil {
+			fmt.Println(err)
+		}
+		fmt.Println(u)
+	}
+}
+
+/*
+$ go run main.go 
+{1 bob 12}
+sql: Scan error on column index 2, name "age": converting NULL to int is unsupported
+{2 tom 12}	<--- なぜかできてしまった扱いで考えた方がいい
+*/
+DBにNullが紛れ込んでいるならsql.NullXXXでcastするが、構造が変わってしまうことに注意
+type User struct {
+	ID   string        `db:"id"`
+	Name string        `db:"name"`
+	Age  sql.NullInt32 `db:"age"`
+}
+
+/*
+$ go run main.go 
+{1 bob {12 true}}
+{2 tom {0 false}}
+*/
+ageの出力が別の構造体に変わっているのは、次のように定義されているためです
+
+type NullInt32 struct {
+	Int32 int32
+	Valid bool // Valid is true if Int32 is not NULL
+}
+ややこしいのは type User は上記のデータ構造なので、単純にUser.AgeをIntで扱うことができません
+
+COALESCE()を利用してNULLを置き換える方法をとるtipsもある
+Databaseの機能でNULLの時にCOALESCE()で取得できた値に置き換える機能ですが、NULLに置き換えたい0や'‘などを用意することでNULLを出さないようにしています
+
+var u User
+rows, _ := db.Query("SELECT id, name, COALESCE(age, 0) as age FROM test_user")
+for rows.Next() {
+	if err := rows.Scan(&u.ID, &u.Name, &u.Age); err != nil {
+		fmt.Println(err)
+	}
+	fmt.Println(u)
+}
+
+/*
+$ go run main.go 
+{1 bob 12}
+{2 tom 0}
+*/
+これらを考えるとNULLと0や'‘を正しく区別したい場合には難しいかもしれません。。 ただ入力区分を作ってNULLかどうか判定する方法もあると思うので、データベースの設計で次第かもしれないですね。
+
+Working with Unkonw Columns
+columnが不明だった場合に、interfaceを利用して取得する方法もある
+The Connection Pool
+連続したステートメンを実行すると、それぞれのコネクションがオープンされる(同一のコネクションでやる必要がある場合はトランザクションを使う)
+コネクション作成数に上限がないため、too many conenctions が発生する場合がある
+db.SetMacOpenConns() でコネクション最大数の制限を設けることが出来る
+db.SetMaxIdleConns() でコネクションプールのアイドル数を設定で、数字が高いほどコネクションプールの再利用性が上がる
+アイドル時間が長くて問題が発生する場合は db.SetMaxIdleConns(0) によって解決するかもしれない
+Suprises, Antipatterns and Limitations
+リソースの枯渇 次のような使い方はしない方がいいようです
+・頻繁なdatabaseとのopen(), close()をした場合
+・rowsの読み込みに失敗したり、rows.Close()ができなかった場合
+・rowsが帰ってこないのにQuery()をした場合(Exec()を使うべき)
+・プリペアドステートメントを有効に使えない場合
+
+uint64を利用して数値が大きすぎる場合
+
+_, err := db.Exec("INSERT INTO users(id) VALUES", math.MaxUint64) // error
+コネクション状態の不一致
+・トランザクションを利用しない限りは一連のステートメントが異なるコネクションで実行される場合があります
+・そのため User, BEGIN, CLOSE などを使っても異なるコネクションになったり、それをプールに返した後、次のコネクションがそれを再利用したことで不具合が発生する場合があるため、コネクションに影響が出るものは直接使ってはいけません
+
+データベース固有のシンタックス
+・データベースドライバによって実装が異なる場合があるため注意が必要です
+
+Multiple Result Sets
+・単一クエリによるMultiple Result Setsのサポートはなさそう？
+・そのためストアドプロシージャで複数の結果を返す方法に対応できません
+
+ストアドプロシージャを呼び出す
+・ドライバーのサポートに依存します
+
+複数ステートメントのサポート ・database/sql では複数のステートメントをサポートしていません
+
+うまく動くときもあれば、変な動きをするときもある。これらは全て予想外となります
+
+_, err := db.Exec("DELETE FROM tbl1; DELETE FROM tbl2") // Error/unpredictable result
+・単一のコネクションにて複数Queryを利用することはできません
+
+これはトランザクションではないので、別のコネクションが起動して使えます
+
+rows, err := db.Query("select * from tbl1") // Uses connection 1
+for rows.Next() {
+	err = rows.Scan(&myvariable)
+	// The following line will NOT use connection 1, which is already in-use
+	db.Query("select * from tbl2 where id = ?", myvariable)
+}
+これはトランザクションなので、同一コネクションで処理しようとしてbusy状態になります
+
+tx, err := db.Begin()
+rows, err := tx.Query("select * from tbl1") // Uses tx's connection
+for rows.Next() {
+	err = rows.Scan(&myvariable)
+	// ERROR! tx's connection is already busy!
+	tx.Query("select * from tbl2 where id = ?", myvariable)
+}
+Related Reading and Resources
+関連ドキュメントの一覧
+追加: コネクションプールの解放条件
+jmoironさんのブログを参考に抜粋。ソースコード読んで確かめるのはまたそのうちします。
+
+sql.Row()のコネクション解放は Scan() が呼ばれたとき
+sql.Rows()のコネクション解放は Next() の終了か、 Close()の時
+sql.Txのコネクション解放はCommit()かRollback()の時
+まとめ
+結構DBのへ理解がスッキリしました。ただ情報がおそらく古い？ので、context利用した方法は別途調べる必要がありそうですね。

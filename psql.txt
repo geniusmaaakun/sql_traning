@@ -1,0 +1,81 @@
+
+create user genius with password 'enius0610';
+
+
+ユーザを作成しALTER ROLEしてみる †
+ユーザを作成して、ALTER ROLEでスーパーユーザ権限などを付与してみます。
+
+ユーザを追加し、ロール一覧を確認
+postgres=# create user sakura with password 'sakurapass';
+CREATE ROLE
+postgres=# create user tsubaki with password 'tsubakipass';
+CREATE ROLE
+postgres=# \du
+                ロール一覧
+ ロール名 |        属性        | メンバー 
+----------+--------------------+----------
+ postgres | スーパーユーザ     | {}
+          : ロールを作成できる   
+          : DBを作成できる       
+ sakura   |                    | {}
+ tsubaki  |                    | {}
+ユーザ(ロール)sakuraにスーパーユーザ権限を付与する ALTER ROLEを使って、sakuraにスーパーユーザ権限を付与しました。
+postgres=# ALTER ROLE sakura WITH SUPERUSER;
+ALTER ROLE
+postgres=# \du
+                ロール一覧
+ ロール名 |        属性        | メンバー 
+----------+--------------------+----------
+ postgres | スーパーユーザ     | {}
+          : ロールを作成できる   
+          : DBを作成できる       
+ sakura   | スーパーユーザ     | {}
+ tsubaki  |                    | {}
+ユーザ(ロール)tsubakiにスーパーユーザ、ロールを作成できる、DBを作成できるを付与してみます。
+postgres=# ALTER ROLE tsubaki WITH SUPERUSER CREATEDB CREATEROLE;
+ALTER ROLE
+postgres=# \du
+                ロール一覧
+ ロール名 |        属性        | メンバー 
+----------+--------------------+----------
+ postgres | スーパーユーザ     | {}
+          : ロールを作成できる   
+          : DBを作成できる       
+ sakura   | スーパーユーザ     | {}
+ tsubaki  | スーパーユーザ     | {}
+          : ロールを作成できる   
+          : DBを作成できる       
+↑
+ALTER ROLEの各種オプション †
+psqlコマンドでログインし、\hコマンドでALTER ROLEの説明を表示しました。
+以下のようにオプションが多数ありますので、必要に応じて設定してください。
+
+postgres=# \h ALTER ROLE
+コマンド:     ALTER ROLE
+説明:         データベースのロールを変更する
+書式:
+ALTER ROLE ロール名 [ [ WITH ] オプション [ ... ] ]
+
+オプションは以下のいずれか:
+    
+      SUPERUSER | NOSUPERUSER
+    | CREATEDB | NOCREATEDB
+    | CREATEROLE | NOCREATEROLE
+    | CREATEUSER | NOCREATEUSER
+    | INHERIT | NOINHERIT
+    | LOGIN | NOLOGIN
+    | CONNECTION LIMIT 最大接続数
+    | [ ENCRYPTED | UNENCRYPTED ] PASSWORD 'パスワード'
+    | VALID UNTIL 'タイムスタンプ' 
+
+ALTER ROLE ロール名 RENAME TO 新しい名前
+
+ALTER ROLE ロール名 SET 設定パラメータ名 { TO | = } { 値 | DEFAULT }
+ALTER ROLE ロール名 SET 設定パラメータ名 FROM CURRENT
+ALTER ROLE ロール名 RESET 設定パラメータ名
+ALTER ROLE ロール名 RESET ALL
+
+セッションユーザ名
+select session_user;
+現在の実行コンテキストのユーザ名
+select current_user;
