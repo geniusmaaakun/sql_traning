@@ -1,0 +1,280 @@
+"BOKU"のITな日常
+https://arakan-pgm-ai.hatenablog.com/entry/2021/06/01/000000
+BOKUが勉強したり、考えたことを頭の整理を兼ねてまとめてます。
+トップ > 0：Go言語 > GO言語（golang）／データベース（MariaDB・MySQL）を使う（１）／database/sqlで最低限のクエリ
+2021-06-01
+GO言語（golang）／データベース（MariaDB・MySQL）を使う（１）／database/sqlで最低限のクエリ
+0：Go言語
+ f:id:arakan_no_boku:20210412005751p:plain
+
+目次
+
+試すための準備
+とりあえずDBに接続できることを試す
+database/sqlのOpen以外のよく使いそうな構文を確認 
+簡単なソースを書いて動かしてみる
+コンテキストについて補足
+実行結果とまとめ
+試すための準備
+今回からGo言語からのDB操作をやります。
+
+DBはMariaDB（MySQL）で、DBはインストールしてある前提です。
+
+ 今回は「dbProc」というフォルダを作ります。
+
+そこをカレントフォルダにして。
+
+go mod init dbproc
+
+を実行して、go.modファイルを生成します。
+
+dbprocはモジュール名なので、別に他の名前でもかまいません。 
+
+go.modファイルができたら、ドライバのインストールをします。
+
+go get -u github.com/go-sql-driver/mysql
+
+インストールはすぐすみます。
+
+GitHubだとここにあります。
+
+
+github.com
+
+とりあえずDBに接続できることを試す
+MariaDBを起動します。
+
+DB・ID・パスワードは適当にblt（特に意味はなく思い付きです）をつけた適当なものをテスト用に作ってやってます。
+
+まずはソースから。
+
+package main
+
+import (
+	"database/sql"
+	"time"
+
+	_ "github.com/go-sql-driver/mysql"
+)
+
+func main() {
+	dbobj, err := sql.Open("mysql", "user_id:password@tcp(localhost:3306)/dbname")
+
+	if err != nil {
+		println("Error!")
+	} else {
+		println("DB Open OK")
+	}
+	// 重要なセッティングだそうです。.
+	dbobj.SetConnMaxLifetime(time.Minute * 3)
+	dbobj.SetMaxOpenConns(10)
+	dbobj.SetMaxIdleConns(10)
+}
+ 基本的な部分を補足します。
+
+MariaDB接続に必要なインポートは次の２つです。
+
+"database/sql"
+_ "github.com/go-sql-driver/mysql"
+
+go-sql-driver/mysqlは、処理の中で直接使わず、「database/sql」パッケージに必要なだけ（＝initが使われるだけ）なので、普通にインポートすると消されてしまいます。
+
+なので、「ブランク(_)識別子」を使ってインポートする必要があります。
+
+データベースオープンの以下の構文
+
+dbobj, err := sql.Open("mysql", "user_id:password@tcp(localhost:3306)/dbname")
+
+引数は
+
+user＿ｉｄ：DBユーザID
+password：DBパスワード
+@tcp(localhost:3306)：@プロトコル（host：port）
+dbname：データベース名
+ですので、環境にあわせて変更します。
+
+続けて、「重要なセッティングだそうです」コメント以下の部分について補足です。
+
+dbobj.SetConnMaxLifetime()
+
+MySQLサーバ、OS、または他のミドルウェアによって接続が閉じられる前に、ドライバによって安全に接続が閉じるために必要で、ミドルウェアの中に、アイドル状態の接続を5分で閉じるものもあるので、5分より短いタイムアウトが必要ということで、上記例では3分にしています。
+
+dbobj.SetMaxOpenConns()
+
+アプリケーションが使用する接続数を制限します。
+
+推奨される制限数はないみたいですが、例ではとりあえず「10」にしています。
+
+dbobj.SetMaxIdleConns()
+
+上記のSetMaxOpenConns()と同じかそれ以上に設定するのが推奨です。
+
+小さくすると、頻繁にコネクションのオープン、クローズが発生する可能性があり、パフォーマンスへの影響があるみたいです。
+
+database/sqlのOpen以外のよく使いそうな構文を確認 
+今回はは、標準の「 database/sql」を使います。
+
+
+golang.org
+
+最低限として、今回は以下だけ取り上げます。
+
+Open()　：データベースをオープンする
+Close()　：データベースをクローズする
+QueryContext()　：行を返すクエリ（通常はSELECT）を実行する。
+ExecContext()　：行を返さずにクエリを実行する。（insert・update・deleteなど）
+簡単なソースを書いて動かしてみる
+適当なテーブルにinsert・updateしてselectしてみます。
+
+ちなみに対象となるテーブルは以下のようなシンプルなものにしてます。
+
+CREATE TABLE IF NOT EXISTS `gotest` (
+`id` int(11) DEFAULT NULL,
+`name` varchar(256) DEFAULT NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+まずはソースから。
+
+package main
+
+import (
+	"context"
+	"database/sql"
+	"fmt"
+	"strconv"
+	"time"
+
+	_ "github.com/go-sql-driver/mysql"
+)
+
+var (
+	db  *sql.DB
+	err error
+)
+
+func main() {
+	// MariaDBを開きます。
+	db, err = sql.Open("mysql", "bltuser:bltpass@tcp(localhost:3306)/bltdb")
+	if err != nil {
+		println("データベースオープンに失敗しました")
+	}
+	defer db.Close()
+	// タイムアウトは３分に設定
+	db.SetConnMaxLifetime(time.Minute * 3)
+	// 接続数はとりあえず10に設定
+	db.SetMaxOpenConns(10)
+	db.SetMaxIdleConns(10)
+	ctx, stop := context.WithCancel(context.Background())
+	defer stop()
+
+	var name = "テスト文字列：その"
+	for id := 1; id < 10; id++ {
+		if _, err := db.ExecContext(ctx, "insert into gotest values(?,?)", id, name+strconv.Itoa(id)); err != nil {
+			fmt.Println("データの挿入に失敗しました。")
+		}
+	}
+
+	type results struct {
+		id   int
+		name string
+	}
+
+	rows, err := db.QueryContext(ctx, "select id,name from gotest where id <= 10")
+	if err != nil {
+		fmt.Println("データの取得に失敗しました。")
+	}
+	for rows.Next() {
+		ret := new(results)
+		if err := rows.Scan(&ret.id, &ret.name); err != nil {
+			fmt.Println("個別データの取得1回目に失敗しました。")
+		}
+		fmt.Printf("取得したIDは「%d」：NAMEは「%s」です。\n", ret.id, ret.name)
+	}
+
+	if _, err := db.ExecContext(ctx, "update gotest set name=? where id < 5", "IDが５より小さい"); err != nil {
+		fmt.Println("データの挿入に失敗しました。")
+	}
+
+	rows_u, err := db.QueryContext(ctx, "select id,name from gotest where id <= 10")
+	if err != nil {
+		fmt.Println("データの取得に失敗しました。")
+	}
+	for rows_u.Next() {
+		rets := new(results)
+		if err := rows_u.Scan(&rets.id, &rets.name); err != nil {
+			fmt.Println("個別データの取得2回目に失敗しました。")
+		}
+		fmt.Printf("更新後に取得したIDは「%d」：NAMEは「%s」です。\n", rets.id, rets.name)
+	}
+
+	if _, err := db.ExecContext(ctx, "delete from gotest"); err != nil {
+		fmt.Println("データの削除に失敗しました。")
+	}
+
+}
+データをinsertし、Selectし、UpdateしてSelectし、最後にDeleteで消してます。
+
+トランザクションを使えばいいような処理ですが、それは次回にまわして、今回はシンプルにやってます。
+
+Selectで取得できた結果を「rows.Scan(&ret.id, &ret.name)」のようにScanで取得した各カラムに対応する変数のポインタ（&付）を渡して、そこにセットさせて、以降の処理ではその変数を使う・・というあたりが独特です。
+
+insert、update、deleteは、SQLがわかるなら見た通りです。
+
+ただ、いずれもの第一引数になっている「ctx」については補足します。
+
+コンテキストについて補足
+ctxという変数は、「ctx, stop := context.WithCancel(context.Background())」で所得で取得して、各SQL実行時の引数に使われています。
+
+このctxにあたるのは「コンテキスト」という、GO言語独特の機能です。
+
+
+xn--go-hh0g6u.com
+
+コンテキストはサーバープログラムなどでデッドライン，キャンセルシグナルや他の API 間，プロセス間のリクエストに関する値を処理するためのものです。
+
+ざっくりいえば、並列で動かして動かしている複数のリクエストがあったとき、１つの処理が失敗したら、他の処理もすべて終了させたい・・みたいな時に使える仕組みを提供してくれているものって感じのものです。
+
+GO言語の肝の一つのようでもありますが、現段階では、とりあえずDB処理をするときに引数に指定するときのやり方をパターンとして覚えておくレベルで流します。
+
+よく「var ctx context.Context」のように定義だけしてるサンプルがありますが、それだと以下のようなエラーがでて動かないことが多いです。
+
+fatal error: all goroutines are asleep - deadlock!
+
+以下のように、ちゃんとcontextを生成して、エラーの時はstop()する・・という定型的な書き方を使うようにすると、なおります。。
+
+ctx, stop := context.WithCancel(context.Background())
+defer stop()
+
+実行結果とまとめ
+上記を実行すると。
+
+取得したIDは「1」：NAMEは「テスト文字列：その1」です。
+取得したIDは「2」：NAMEは「テスト文字列：その2」です。
+取得したIDは「3」：NAMEは「テスト文字列：その3」です。
+取得したIDは「4」：NAMEは「テスト文字列：その4」です。
+取得したIDは「5」：NAMEは「テスト文字列：その5」です。
+取得したIDは「6」：NAMEは「テスト文字列：その6」です。
+取得したIDは「7」：NAMEは「テスト文字列：その7」です。
+取得したIDは「8」：NAMEは「テスト文字列：その8」です。
+取得したIDは「9」：NAMEは「テスト文字列：その9」です。
+更新後に取得したIDは「1」：NAMEは「IDが５より小さい」です。
+更新後に取得したIDは「2」：NAMEは「IDが５より小さい」です。
+更新後に取得したIDは「3」：NAMEは「IDが５より小さい」です。
+更新後に取得したIDは「4」：NAMEは「IDが５より小さい」です。
+更新後に取得したIDは「5」：NAMEは「テスト文字列：その5」です。
+更新後に取得したIDは「6」：NAMEは「テスト文字列：その6」です。
+更新後に取得したIDは「7」：NAMEは「テスト文字列：その7」です。
+更新後に取得したIDは「8」：NAMEは「テスト文字列：その8」です。
+更新後に取得したIDは「9」：NAMEは「テスト文字列：その9」です。
+
+みたいな結果が表示されます。
+
+とりあえず、DBをオープンして、シンプルなSQLは実行できるようになりました。
+
+とはいえ。
+
+単純なことしかしていないのに、なんとなくソースがゴチャゴチャした感がありますし、更新系のところとかも、できればトランザクションにしたいところではあります。
+
+トランザクション処理を含めて、もう少しすっきりした書き方ができるライブラリとかを使って、次回はやってみようかと思います。
+
+ではでは。

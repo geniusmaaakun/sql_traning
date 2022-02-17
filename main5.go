@@ -8,6 +8,19 @@ import (
 	_ "github.com/lib/pq"
 )
 
+/*
+	複数クエリがあってロールバックする必要が出てくる場合があるならトランザクションを使う。
+
+	2,
+	使うメソッドは4つで名前の通です。
+	・db.Begin()
+	・tx.Exec()
+	・tx.Rollback()
+	・tx.Commit()
+
+	main関数で書いたのでerror処理やdeferなどざっくりですが、こんな感じです。
+*/
+
 type User struct {
 	ID   string `db:"id"`
 	Name string `db:"name"`

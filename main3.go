@@ -9,7 +9,8 @@ import (
 )
 
 /*
-SQLに引数を利用する場合はdb.Prepare()かdb.Query()で渡すこと
+SQLに引数を利用する場合はdb.Prepare()かdb.Query()で渡すことで、適切にクエリをSQL文を構成する。
+直接渡すと、SQLインジェクションの脆弱性を含む事になる。
 プレースホルダで記載することでSQLインジェクション対策にもなります。もし検索機能などで外部からVALUEを受け取る場合はfmt.Sprintf()では作らないようにする。
 
 プレースホルダ 【placeholder】
@@ -42,11 +43,13 @@ func main() {
 
 	//どちらかでやること
 	/*
-			prep, err := db.Prepare("SELECT * FROM test_user WHERE name = $1")
-			defer prep.Close()
-			rows, err := prep.Query("tom")
-			defer rows.Close()
+		prep, err := db.Prepare("SELECT * FROM test_user WHERE name = $1")
+		defer prep.Close()
+		//rows, err := prep.Query("tom")
+		rows, err := prep.Query("tom or 1 = 1;")
+		defer rows.Close()
 
+		または
 
 		rows, err := db.Query("SELECT * FROM test_user WHERE name = $1", "tom or 1 = 1;")
 		defer rows.Close()
